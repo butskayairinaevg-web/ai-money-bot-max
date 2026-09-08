@@ -57,6 +57,16 @@ PDF_PATH = Path(os.environ.get("PDF_PATH", "установка AI агента.p
 MAX_API = "https://platform-api2.max.ru"
 HEADERS = {"Authorization": MAX_TOKEN, "Content-Type": "application/json"}
 
+# Верификация TLS к platform-api2.max.ru: у MAX своя CA-цепочка (в т.ч.
+# Минцифры). Если хост не имеет нужного корневого сертификата — ставьте
+# в .env MAX_TLS_VERIFY=false (при доступном CA рекомендуем true).
+_TLS_VERIFY = os.environ.get("MAX_TLS_VERIFY", "true").strip().lower() not in ("0", "false", "no")
+
+
+def _api(timeout: float = 20.0) -> httpx.AsyncClient:
+    """HTTP-клиент к MAX API с учётом настройки TLS-верификации."""
+    return httpx.AsyncClient(timeout=timeout, verify=_TLS_VERIFY)
+
 # ── Маленькая очередь на лимит 2 msg/сек в один диалог ──────────────────────
 _send_lock = threading.Lock()
 _last_send_time: dict = {}
@@ -80,7 +90,7 @@ async def send_text(user_id: str, text: str) -> None:
     """Отправить простое текстовое сообщение пользователю."""
     _rate_limit(f"u{user_id}")
     payload = {"text": text, "format": "markdown"}
-    async with httpx.AsyncClient(timeout=20) as client:
+    async with _api(20) as client:
         r = await client.post(
             f"{MAX_API}/messages?user_id={user_id}",
             headers=HEADERS,
@@ -123,7 +133,7 @@ async def send_image_to_admin(image_token: str, caption: str) -> None:
         ],
     }
     # TODO(probe): структура кнопки-callback и передача id покупателя уточняется.
-    async with httpx.AsyncClient(timeout=20) as client:
+    async with _api(20) as client:
         r = await client.post(
             f"{MAX_API}/messages?user_id={ADMIN_USER_ID}",
             headers=HEADERS,
@@ -134,7 +144,7 @@ async def send_image_to_admin(image_token: str, caption: str) -> None:
 
 async def upload_pdf() -> str:
     """Загружает PDF через POST /uploads?type=file, возвращает upload-токен."""
-    async with httpx.AsyncClient(timeout=60) as client:
+    async with _api(60) as client:
         # Шаг 1: получаем URL загрузки и upload-токен
         r = await client.post(
             f"{MAX_API}/uploads?type=file",
@@ -164,7 +174,7 @@ async def send_file_to_user(user_id: str, caption: str) -> None:
             {"type": "file", "payload": {"token": token}}
         ],
     }
-    async with httpx.AsyncClient(timeout=60) as client:
+    async with _api(60) as client:
         r = await client.post(
             f"{MAX_API}/messages?user_id={user_id}",
             headers=HEADERS,
@@ -190,9 +200,11 @@ app = FastAPI(title="ai-methodichka-max-bot")
 
 @app.post("/webhook")
 async def webhook(request: Request):
-    """Точка входа для событий MAX (POST на /webhook)."""
-    # TODO(probe): проверьте формат входящего события на реальном токене:
-    # MAX присылает объект Update (или массив). Поле типа события — update_type.
+    """Точка входа для событий MAX (POST на /webhook).
+
+    MAX требует HTTP 200 в течение 30 c, поэтому отвечаем сразу,
+    а обработку событий выполняем в фоне через asyncio.
+    """
     try:
         payload = await request.json()
     except Exception:
@@ -200,17 +212,23 @@ async def webhook(request: Request):
 
     updates = payload if isinstance(payload, list) else [payload]
     for upd in updates:
-        # Фоновое выполнение обработки (не блокировать ответ MAX)
-        try:
-            await handle_update(upd)
-        except Exception as e:
-            logger.exception("Ошибка обработки update: %s", e)
+        asyncio.create_task(_handle_safe(upd))
     return JSONResponse({"ok": True})
+
+
+async def _handle_safe(upd: dict) -> None:
+    """Фоновая обёртка: не рушит webhook при ошибке обработки."""
+    try:
+        await handle_update(upd)
+    except Exception:
+        logger.exception("Ошибка обработки update")
 
 
 async def handle_update(upd: dict) -> None:
     kind = upd.get("update_type")
-    # TODO(probe): структура событий message_created и message_callback уточняется.
+    # Полный входящий объект пишем в лог — на живом токене по нему
+    # сверяем реальную структуру событий (поля user, message и т.п.).
+    logger.info("UPDATE type=%s payload=%s", kind, json.dumps(upd, ensure_ascii=False, default=str)[:2000])
 
     if kind == "bot_started":
         # Возобновление/начало диалога (аналог /start). Сообщаем цену.
