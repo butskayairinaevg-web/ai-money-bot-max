@@ -1,0 +1,16 @@
+[Unit]
+Description=MAX bot - продавец методички "Установка ИИ-агента"
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=yc-user
+WorkingDirectory=/home/yc-user/max-bot
+EnvironmentFile=/home/yc-user/max-bot/.env
+ExecStart=/home/yc-user/max-bot/.venv/bin/python /home/yc-user/max-bot/bot_max.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
