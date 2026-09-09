@@ -314,6 +314,24 @@ async def _handle_safe(upd: dict) -> None:
         logger.exception("Ошибка обработки update")
 
 
+
+_PAYMENT_WORDS = ("перевел", "перевёл", "оплатил", "кинул", "перевод",
+                  "чек", "скрин", "оплата", "квитанц", "перевод на", "с карты")
+
+
+def looks_like_payment(text: str) -> bool:
+    """Грубая эвристика: похоже ли текстовое сообщение на сообщение об оплате.
+
+    Чек обычно присылают фотографией — картинку считаем чеком всегда (выше).
+    Текстом «чек» считаем только если текст упоминает перевод/оплату/чек.
+    Всё прочее (приветствия, вопросы «сколько стоит», «хочу консультацию»
+    и т.п.) НЕ считается чеком и не должно превращаться в ложный «Новый чек»
+    у админа.
+    """
+    low = text.lower()
+    return any(w in low for w in _PAYMENT_WORDS)
+
+
 async def handle_update(upd: dict) -> None:
     kind = upd.get("update_type")
     logger.info("UPDATE type=%s payload=%s", kind, json.dumps(upd, ensure_ascii=False, default=str)[:2000])
@@ -345,7 +363,24 @@ async def handle_update(upd: dict) -> None:
         user_id = str(user_id)
 
         has_photo = any(a.get("type") == "image" for a in attachments)
-        if not has_photo and not text.strip():
+
+        # Чек: фото ИЛИ текст с явным упоминанием оплаты.
+        is_check = has_photo or looks_like_payment(text)
+        if not is_check and not text.strip():
+            # ничего не прислали — игнор
+            return
+        if not is_check:
+            # обычный вопрос/приветствие (не чек) — отвечаем человеку,
+            # фейковый «чек» админу НЕ уходит
+            await send_text(
+                user_id,
+                "👋 Привет! Чтобы купить методичку «Установка ИИ-агента» "
+                f"({PRICE} ₽):\n\n"
+                "ℹ️ Подпишитесь на канал и напишите в комментариях «ХОЧУ» — "
+                "пришлю инструкцию и детали оплаты.\n\n"
+                "Если вы уже перевели оплату — пришлите сюда *скриншот чека*,"
+                " я проверю и отправлю методичку.",
+            )
             return
 
         # Покупатель прислал чек — пробрасываем админу.
