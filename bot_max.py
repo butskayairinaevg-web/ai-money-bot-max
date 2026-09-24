@@ -112,6 +112,48 @@ async def send_text(user_id: str, text: str) -> None:
     logger.info("send_text -> user %s", user_id)
 
 
+async def send_welcome(user_id: str) -> None:
+    """Оффер + кнопка «ХОЧУ» (решение Ирины 24.09).
+
+    Реквизиты — отдельным шагом по нажатию кнопки, а не сразу: так
+    покупатель нажимает кнопку вместо угадывания слов («хочу»,
+    «сколько стоит» и т.п.). Кнопка — тип callback с payload "want".
+    """
+    _rate_limit(f"u{user_id}")
+    payload = {
+        "text": welcome_text(),
+        "format": "markdown",
+        "attachments": [
+            {
+                "type": "inline_keyboard",
+                "payload": {
+                    "buttons": [
+                        [
+                            {
+                                "type": "callback",
+                                "text": "💳 ХОЧУ методичку",
+                                "payload": "want",
+                            }
+                        ]
+                    ]
+                },
+            }
+        ],
+    }
+    await _post_message(user_id, payload)
+    logger.info("send_welcome (кнопка ХОЧУ) -> user %s", user_id)
+
+
+async def send_payment(user_id: str) -> None:
+    """Цена + номер Юмани + просьба прислать скрин чека (шаг по «ХОЧУ»).
+
+    Отдельная обёртка от send_text(), потому что это ключевой шаг воронки:
+    его видно в логах отдельным именем.
+    """
+    await send_text(user_id, payment_text())
+    logger.info("send_payment (цена+реквизиты) -> user %s", user_id)
+
+
 async def send_image_to_admin(image_payload: dict, caption: str, buyer_id: str) -> None:
     """Переслать чек-изображение админу с кнопками «Выдать / Отклонить».
 
@@ -265,8 +307,7 @@ def welcome_text() -> str:
         "✅ Твой компьютер работает на тебя, а не ты на него\n"
         "✅ Никаких навыков программирования не нужно\n\n"
         "Установка за 5 минут:\n"
-        "Подпишись на канал\n"
-        "Напиши в комментариях «ХОЧУ»\n"
+        "Нажми кнопку «ХОЧУ» ниже — пришлю цену и реквизиты\n"
         "Я пришлю инструкцию с картинками\n"
         "Даже твоя бабушка справится\n\n"
         "⚡️ Каждый день без CodeWhale — это потерянное время."
@@ -274,6 +315,11 @@ def welcome_text() -> str:
 
 
 def payment_text() -> str:
+    """Реквизиты и цена — отдаются ТОЛЬКО в ответ на «Хочу».
+
+    При старте диалога не отправляется (решение Ирины 24.09):
+    цена и кошелёк — следующий шаг, а не первый экран.
+    """
     return (
         "📘 *Методичка «Установка ИИ-агента»*\n\n"
         f"Цена: *{PRICE} ₽*\n\n"
@@ -318,6 +364,11 @@ async def _handle_safe(upd: dict) -> None:
 _PAYMENT_WORDS = ("перевел", "перевёл", "оплатил", "кинул", "перевод",
                   "чек", "скрин", "оплата", "квитанц", "перевод на", "с карты")
 
+# Шаг покупки идёт через КНОПКУ «ХОЧУ» (callback payload "want"),
+# а не через разбор текста. Список текстовых триггеров удалён 24.09:
+# короткие слова («да», «ок») ловились как подстрока («пр-да-л», «с-да-л»)
+# и могли увести чек в ветку «цена» вместо пересылки админу.
+
 
 def looks_like_payment(text: str) -> bool:
     """Грубая эвристика: похоже ли текстовое сообщение на сообщение об оплате.
@@ -332,19 +383,69 @@ def looks_like_payment(text: str) -> bool:
     return any(w in low for w in _PAYMENT_WORDS)
 
 
+def looks_like_buy(text: str) -> bool:
+    """Устарело 24.09: шаг покупки идёт через кнопку, а не через текст.
+
+    Оставлено, чтобы не ломать возможные внешние вызовы; в обработке
+    обновлений НЕ используется.
+    """
+    return False
+
+
+def _buy_or_help_text() -> str:
+    """Подсказка на любой текст, который не чек.
+
+    Слова-угадайки («хочу», «сколько стоит», «да») убраны 24.09: шаг покупки
+    идёт через кнопку, а не через разбор текста. Текст не должен уводить
+    в канал — канала ещё нет.
+    """
+    return (
+        "👋 Это бот методички «Установка ИИ-агента».\n\n"
+        "Нажмите кнопку «*💳 ХОЧУ методичку*» — пришлю цену и реквизиты.\n\n"
+        "Уже перевели оплату? Пришлите сюда *скриншот чека* — "
+        "проверю и отправлю методичку."
+    )
+
+
+async def send_help(user_id: str) -> None:
+    """Подсказка с КНОПКОЙ «ХОЧУ» — чтобы шаг покупки был в одно нажатие."""
+    _rate_limit(f"u{user_id}")
+    payload = {
+        "text": _buy_or_help_text(),
+        "format": "markdown",
+        "attachments": [
+            {
+                "type": "inline_keyboard",
+                "payload": {
+                    "buttons": [
+                        [
+                            {
+                                "type": "callback",
+                                "text": "💳 ХОЧУ методичку",
+                                "payload": "want",
+                            }
+                        ]
+                    ]
+                },
+            }
+        ],
+    }
+    await _post_message(user_id, payload)
+    logger.info("send_help (кнопка ХОЧУ) -> user %s", user_id)
+
+
 async def handle_update(upd: dict) -> None:
     kind = upd.get("update_type")
     logger.info("UPDATE type=%s payload=%s", kind, json.dumps(upd, ensure_ascii=False, default=str)[:2000])
 
     if kind == "bot_started":
-        # Возобновление/начало диалога (аналог /start). Сначала оффер про
-        # CodeWhale, затем (для имеющих целью покупку) — методичка с ценой.
+        # Возобновление/начало диалога (аналог /start). Только оффер + кнопка
+        # «ХОЧУ». Цена и реквизиты НЕ отправляются здесь — их отдаём по нажатию
+        # кнопки (решение Ирины 24.09). Канала ещё нет — на подписку не зовём.
         user = upd.get("user") or {}
         user_id = user.get("user_id") or upd.get("user_id")
         if user_id:
-            uid = str(user_id)
-            await send_text(uid, welcome_text())
-            await send_text(uid, payment_text())
+            await send_welcome(str(user_id))
         return
 
     if kind == "message_created":
@@ -370,17 +471,9 @@ async def handle_update(upd: dict) -> None:
             # ничего не прислали — игнор
             return
         if not is_check:
-            # обычный вопрос/приветствие (не чек) — отвечаем человеку,
-            # фейковый «чек» админу НЕ уходит
-            await send_text(
-                user_id,
-                "👋 Привет! Чтобы купить методичку «Установка ИИ-агента» "
-                f"({PRICE} ₽):\n\n"
-                "ℹ️ Подпишитесь на канал и напишите в комментариях «ХОЧУ» — "
-                "пришлю инструкцию и детали оплаты.\n\n"
-                "Если вы уже перевели оплату — пришлите сюда *скриншот чека*,"
-                " я проверю и отправлю методичку.",
-            )
+            # Не чек — подсказка с кнопкой «ХОЧУ». Шаг покупки — одно нажатие,
+            # слова не разбираем. Фейковый «чек» админу НЕ уходит.
+            await send_help(user_id)
             return
 
         # Покупатель прислал чек — пробрасываем админу.
@@ -408,14 +501,29 @@ async def handle_update(upd: dict) -> None:
         # Нажатие кнопки. Реальная структура (09.09):
         #   callback.user.user_id  — кто нажал
         #   callback.payload       — строка "approve:<buyer_id>" / "reject:<id>"
+        #                            (админ) или "want" / "received" (покупатель)
         cb = upd.get("callback") or {}
         from_user_id = (cb.get("user") or {}).get("user_id")
+        data = cb.get("payload") or ""
+        action, _, buyer = data.partition(":")
+
+        # ── Кнопки ПОКУПАТЕЛЯ (доступны всем) ───────────────────────────────
+        # Раньше весь блок был закрыт фильтром «только админ», из-за чего
+        # кнопка «✅ Методичка получена» у покупателя не обрабатывалась.
+        if action == "want":
+            if from_user_id is not None:
+                logger.info("callback 'want' от user_id=%s", from_user_id)
+                await send_payment(str(from_user_id))
+            return
+        if action == "received":
+            logger.info("callback 'received' от user_id=%s", from_user_id)
+            return
+
+        # ── Кнопки АДМИНА (approve / reject) — строго только админ ──────────
         if str(from_user_id) != ADMIN_USER_ID:
             logger.info("callback от не-админа user_id=%s — игнор", from_user_id)
             return
 
-        data = cb.get("payload") or ""
-        action, _, buyer = data.partition(":")
         if action == "approve" and buyer:
             try:
                 await send_file_to_user(buyer, "📘 Ваша методичка! Спасибо за покупку.")
